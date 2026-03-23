@@ -12,14 +12,24 @@ Usage:
 
 import argparse
 import random
+import sqlite3
 from copy import copy
 from datetime import date, timedelta
+from pathlib import Path
 
 from openpyxl import load_workbook
 from openpyxl.cell.cell import MergedCell
 from openpyxl.utils import get_column_letter
 
 from netsuite_mock_data import TABLES
+
+# Path to the persisted mock DB (one level above src/)
+DB_PATH = Path(__file__).parent.parent / "netsuite_mock.db"
+
+# Some tables use a different name in the DB than in the TABLES dict
+DB_TABLE_MAP = {
+    "TRANSACTION": "ns_transaction",
+}
 
 # ---------------------------------------------------------------------------
 # Mock metadata per table
@@ -308,7 +318,14 @@ SECTION_E_ROW_COUNT = len(SECTION_E_STATIC)
 # ---------------------------------------------------------------------------
 
 def mock_row_counts() -> dict:
-    return {t: base + random.randint(-50, 50) for t, base in TABLES.items()}
+    """Return actual SELECT COUNT(*) results from netsuite_mock.db."""
+    conn = sqlite3.connect(DB_PATH)
+    counts = {}
+    for table in TABLES:
+        db_table = DB_TABLE_MAP.get(table, table.lower())
+        counts[table] = conn.execute(f'SELECT COUNT(*) FROM "{db_table}"').fetchone()[0]
+    conn.close()
+    return counts
 
 
 def mock_date_range(table: str) -> str:
