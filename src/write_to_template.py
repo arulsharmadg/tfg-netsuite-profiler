@@ -12,6 +12,7 @@ Usage:
 
 import argparse
 import random
+from copy import copy
 from datetime import date, timedelta
 
 from openpyxl import load_workbook
@@ -356,6 +357,24 @@ def resolve_sentinel(value, row_count: int):
     return value  # unrecognised form — leave as-is
 
 
+def copy_block_format(ws, source_idx: int, target_idx: int, n_cols: int = 12):
+    """Copy cell styles (fill, font, border, alignment, number_format) from
+    the source block to the target block row-for-row, column-for-column.
+    Call this AFTER unmerging so every cell is a plain Cell object.
+    """
+    source_base = BLOCK_START_ROW + source_idx * BLOCK_HEIGHT
+    target_base = BLOCK_START_ROW + target_idx * BLOCK_HEIGHT
+    for row_off in range(BLOCK_HEIGHT):
+        for col in range(1, n_cols + 1):
+            src = ws.cell(row=source_base + row_off, column=col)
+            tgt = ws.cell(row=target_base + row_off, column=col)
+            tgt.font          = copy(src.font)
+            tgt.fill          = copy(src.fill)
+            tgt.border        = copy(src.border)
+            tgt.alignment     = copy(src.alignment)
+            tgt.number_format = src.number_format
+
+
 def safe_write(ws, row: int, col: int, value):
     """Write value to a cell (assumes all merges have been removed beforehand)."""
     ws.cell(row=row, column=col, value=value)
@@ -377,6 +396,10 @@ def fill_template(template_path: str, output_path: str):
     # Template colours, fonts, and borders are preserved; only merge spans are dropped.
     for mr in list(ws.merged_cells.ranges):
         ws.unmerge_cells(str(mr))
+
+    # Propagate block-1 formatting to blocks 4–N (template only has 3 styled blocks).
+    for slot_idx in range(TEMPLATE_BLOCK_COUNT, n):
+        copy_block_format(ws, source_idx=0, target_idx=slot_idx)
 
     total_rows = sum(counts.values())
 
