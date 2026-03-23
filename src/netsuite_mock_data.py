@@ -4,16 +4,18 @@ import random
 fake = Faker()
 
 TABLES = {
-    "CUSTOMER": 500,
-    "VENDOR": 200,
-    "ITEM": 1000,
-    "TRANSACTION": 5000,
-    "EMPLOYEE": 150,
-    "ACCOUNT": 300,
-    "SUBSIDIARY": 20,
-    "DEPARTMENT": 50,
-    "SALESORDER": 2500,
-    "PURCHASEORDER": 800,
+    "CUSTOMER":        500,
+    "VENDOR":          200,
+    "ITEM":           1000,
+    "TRANSACTION":    5000,
+    "TRANSACTIONLINE":10000,
+    "EMPLOYEE":        150,
+    "ACCOUNT":         300,
+    "LOCATION":         20,
+    "SUBSIDIARY":        5,
+    "DEPARTMENT":       10,
+    "SALESORDER":     2500,
+    "PURCHASEORDER":   800,
 }
 
 

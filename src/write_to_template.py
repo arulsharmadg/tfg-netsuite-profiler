@@ -28,7 +28,9 @@ DB_PATH = Path(__file__).parent.parent / "netsuite_mock.db"
 
 # Some tables use a different name in the DB than in the TABLES dict
 DB_TABLE_MAP = {
-    "TRANSACTION": "ns_transaction",
+    "TRANSACTION":    "ns_transaction",
+    "TRANSACTIONLINE": "transactionline",
+    "LOCATION":       "location",
 }
 
 # ---------------------------------------------------------------------------
@@ -36,20 +38,30 @@ DB_TABLE_MAP = {
 # ---------------------------------------------------------------------------
 TABLE_META = {
     "TRANSACTION": {
-        "purpose": "Records all financial transactions (invoices, payments, journals)",
+        "purpose": "All transaction headers: WorkOrd, Invoice, Payment, Journal, CreditMemo. "
+                   "createdfrom links child transactions (e.g. Invoice) to source (e.g. WorkOrd).",
         "grain": "One row = one transaction header",
         "pk": "id (surrogate)",
         "domain": "D5 – Financials",
-        "entities": "TRANSACTION, INVOICE, JOURNAL_ENTRY",
+        "entities": "TRANSACTION, WORKORDER, INVOICE, JOURNAL_ENTRY",
         "date_field": "trandate",
     },
     "TRANSACTIONLINE": {
-        "purpose": "Line-level detail for each transaction",
-        "grain": "One row = one transaction line item",
-        "pk": "id + line (composite)",
+        "purpose": "Line-level detail per transaction. employee_id populated for Service "
+                   "(labour) lines; NULL for material/non-labour lines.",
+        "grain": "One row = one transaction line",
+        "pk": "id (surrogate)",
         "domain": "D5 – Financials",
         "entities": "TRANSACTION_LINE",
-        "date_field": "trandate",
+        "date_field": "",
+    },
+    "LOCATION": {
+        "purpose": "Physical office / site locations. customer.location_id references this table.",
+        "grain": "One row = one location",
+        "pk": "id (surrogate)",
+        "domain": "D1 – Customers & Locations",
+        "entities": "LOCATION",
+        "date_field": "",
     },
     "CUSTOMER": {
         "purpose": "Master record for all customers / billing entities",
@@ -176,42 +188,55 @@ ORIGINAL_SECTION_E = {
 # Column definitions per table: (col_name, col_type)
 # Stats (null%, distinct, min, max, notes, RAG) are queried from the DB at runtime.
 TABLE_COLUMNS = {
-    "CUSTOMER":      [("id","INTEGER"),("companyname","VARCHAR"),("email","VARCHAR"),
-                      ("datecreated","DATETIME"),("subsidiary_id","INTEGER")],
-    "VENDOR":        [("id","INTEGER"),("companyname","VARCHAR"),("email","VARCHAR"),
-                      ("datecreated","DATETIME"),("subsidiary_id","INTEGER")],
-    "ITEM":          [("id","INTEGER"),("itemid","VARCHAR"),("salesdescription","VARCHAR"),
-                      ("rate","DECIMAL"),("lastmodifieddate","DATETIME")],
-    "TRANSACTION":   [("id","INTEGER"),("tranid","VARCHAR"),("type","VARCHAR"),
-                      ("trandate","DATETIME"),("entity","INTEGER"),
-                      ("subsidiary_id","INTEGER"),("amount","DECIMAL")],
-    "EMPLOYEE":      [("id","INTEGER"),("entityid","VARCHAR"),("firstname","VARCHAR"),
-                      ("lastname","VARCHAR"),("email","VARCHAR"),
-                      ("datecreated","DATETIME"),("subsidiary_id","INTEGER")],
-    "ACCOUNT":       [("id","INTEGER"),("acctnumber","VARCHAR"),("acctname","VARCHAR"),
-                      ("accttype","VARCHAR"),("subsidiary_id","INTEGER")],
-    "SUBSIDIARY":    [("id","INTEGER"),("name","VARCHAR")],
-    "DEPARTMENT":    [("id","INTEGER"),("name","VARCHAR"),("subsidiary_id","INTEGER")],
-    "SALESORDER":    [("id","INTEGER"),("tranid","VARCHAR"),("trandate","DATE"),
-                      ("entity","INTEGER"),("amount","DECIMAL"),("status","VARCHAR")],
-    "PURCHASEORDER": [("id","INTEGER"),("tranid","VARCHAR"),("trandate","DATE"),
-                      ("entity","INTEGER"),("amount","DECIMAL"),("status","VARCHAR")],
+    "CUSTOMER":        [("id","INTEGER"),("companyname","VARCHAR"),("email","VARCHAR"),
+                        ("location_id","INTEGER"),("subsidiary_id","INTEGER"),
+                        ("datecreated","DATETIME"),("contract_ref","VARCHAR")],
+    "VENDOR":          [("id","INTEGER"),("companyname","VARCHAR"),("email","VARCHAR"),
+                        ("datecreated","DATETIME"),("subsidiary_id","INTEGER")],
+    "ITEM":            [("id","INTEGER"),("itemid","VARCHAR"),("salesdescription","VARCHAR"),
+                        ("itemtype","VARCHAR"),("rate","DECIMAL"),
+                        ("lastmodifieddate","DATETIME")],
+    "TRANSACTION":     [("id","INTEGER"),("tranid","VARCHAR"),("type","VARCHAR"),
+                        ("trandate","DATETIME"),("entity","INTEGER"),
+                        ("subsidiary_id","INTEGER"),("amount","DECIMAL"),
+                        ("createdfrom","INTEGER"),("contract_ref","VARCHAR")],
+    "TRANSACTIONLINE": [("id","INTEGER"),("transaction_id","INTEGER"),("line","INTEGER"),
+                        ("item_id","INTEGER"),("quantity","DECIMAL"),("rate","DECIMAL"),
+                        ("amount","DECIMAL"),("account_id","INTEGER"),
+                        ("employee_id","INTEGER")],
+    "EMPLOYEE":        [("id","INTEGER"),("entityid","VARCHAR"),("firstname","VARCHAR"),
+                        ("lastname","VARCHAR"),("email","VARCHAR"),
+                        ("datecreated","DATETIME"),("subsidiary_id","INTEGER")],
+    "ACCOUNT":         [("id","INTEGER"),("acctnumber","VARCHAR"),("acctname","VARCHAR"),
+                        ("accttype","VARCHAR"),("subsidiary_id","INTEGER")],
+    "LOCATION":        [("id","INTEGER"),("name","VARCHAR"),("city","VARCHAR"),
+                        ("country","VARCHAR"),("subsidiary_id","INTEGER")],
+    "SUBSIDIARY":      [("id","INTEGER"),("name","VARCHAR")],
+    "DEPARTMENT":      [("id","INTEGER"),("name","VARCHAR"),("subsidiary_id","INTEGER")],
+    "SALESORDER":      [("id","INTEGER"),("tranid","VARCHAR"),("trandate","DATE"),
+                        ("entity","INTEGER"),("amount","DECIMAL"),("status","VARCHAR")],
+    "PURCHASEORDER":   [("id","INTEGER"),("tranid","VARCHAR"),("trandate","DATE"),
+                        ("entity","INTEGER"),("amount","DECIMAL"),("status","VARCHAR")],
 }
 
 # FK relationship definitions per table: (fk_col, parent_logical_name, parent_pk)
-# Orphan counts and percentages are queried from the DB at runtime.
 TABLE_FK_DEFS = {
-    "CUSTOMER":      [("subsidiary_id","SUBSIDIARY","id"),("department_id","DEPARTMENT","id")],
-    "VENDOR":        [("subsidiary_id","SUBSIDIARY","id")],
-    "ITEM":          [("subsidiary_id","SUBSIDIARY","id"),("department_id","DEPARTMENT","id")],
-    "TRANSACTION":   [("entity","CUSTOMER","id"),("subsidiary_id","SUBSIDIARY","id"),
-                      ("department_id","DEPARTMENT","id")],
-    "EMPLOYEE":      [("subsidiary_id","SUBSIDIARY","id"),("department_id","DEPARTMENT","id")],
-    "ACCOUNT":       [("subsidiary_id","SUBSIDIARY","id")],
-    "SUBSIDIARY":    [],
-    "DEPARTMENT":    [("subsidiary_id","SUBSIDIARY","id")],
-    "SALESORDER":    [("entity","CUSTOMER","id"),("subsidiary_id","SUBSIDIARY","id")],
-    "PURCHASEORDER": [("entity","VENDOR","id"),("subsidiary_id","SUBSIDIARY","id")],
+    "CUSTOMER":        [("location_id","LOCATION","id"),("subsidiary_id","SUBSIDIARY","id"),
+                        ("department_id","DEPARTMENT","id")],
+    "VENDOR":          [("subsidiary_id","SUBSIDIARY","id")],
+    "ITEM":            [("subsidiary_id","SUBSIDIARY","id"),("department_id","DEPARTMENT","id")],
+    "TRANSACTION":     [("entity","CUSTOMER","id"),("subsidiary_id","SUBSIDIARY","id"),
+                        ("department_id","DEPARTMENT","id"),
+                        ("createdfrom","TRANSACTION","id")],
+    "TRANSACTIONLINE": [("transaction_id","TRANSACTION","id"),("item_id","ITEM","id"),
+                        ("account_id","ACCOUNT","id"),("employee_id","EMPLOYEE","id")],
+    "EMPLOYEE":        [("subsidiary_id","SUBSIDIARY","id"),("department_id","DEPARTMENT","id")],
+    "ACCOUNT":         [("subsidiary_id","SUBSIDIARY","id")],
+    "LOCATION":        [("subsidiary_id","SUBSIDIARY","id")],
+    "SUBSIDIARY":      [],
+    "DEPARTMENT":      [("subsidiary_id","SUBSIDIARY","id")],
+    "SALESORDER":      [("entity","CUSTOMER","id"),("subsidiary_id","SUBSIDIARY","id")],
+    "PURCHASEORDER":   [("entity","VENDOR","id"),("subsidiary_id","SUBSIDIARY","id")],
 }
 
 # Section D freshness
