@@ -15,6 +15,7 @@ import random
 from datetime import date, timedelta
 
 from openpyxl import load_workbook
+from openpyxl.cell.cell import MergedCell
 from openpyxl.utils import get_column_letter
 
 from netsuite_mock_data import TABLES
@@ -121,7 +122,7 @@ SECTION_A = {
     10: "Fabric Tables",
     11: "2025-03-01",
     12: "Daily",
-    13: "~10,500 rows across 10 key tables",
+    13: "=TOTAL_ROWS rows across 10 key tables",
     14: "2020-01-01 to 2025-03-01",
     15: "NetSuite SuiteQL 2024.1",
     16: "Minor null rate on subsidiary_id in TRANSACTION",
@@ -129,60 +130,27 @@ SECTION_A = {
     18: "Scheduled for 2025-03-15",
 }
 
-# Section B: (header_row, view_name_row, row_count_row, field_start_row, fk_start_row)
-BLOCK_SLOTS = [
-    (23, 25, 28, 37, 45),
-    (49, 51, 54, 63, 71),
-    (75, 77, 80, 89, 97),
-]
+# Section B: block layout constants
+# Each block is BLOCK_HEIGHT rows tall, starting at BLOCK_START_ROW.
+# Offsets within a block (relative to block base row):
+#   +0  = table header label
+#   +2  = view/table name row
+#   +5  = row count row
+#   +14 = field-level quality start
+#   +22 = referential integrity start
+BLOCK_HEIGHT = 26
+BLOCK_START_ROW = 23
+# How many blocks the template physically contains (we insert rows for extras)
+TEMPLATE_BLOCK_COUNT = 3
+# First row immediately after the last template block
+TEMPLATE_AFTER_BLOCKS_ROW = BLOCK_START_ROW + TEMPLATE_BLOCK_COUNT * BLOCK_HEIGHT  # 101
 
-# Field-level quality data per table: (name, type, null_pct, distinct, min, max, notes, rag)
-TABLE_FIELDS = {
-    "CUSTOMER": [
-        ("id",           "INTEGER",  "0%",   "~500",  1,            9999,          "PK – no nulls",                "GREEN"),
-        ("companyname",  "VARCHAR",  "2%",   "~490",  "Aaron Inc",  "Zurich LLC",  "2% blank names",               "AMBER"),
-        ("email",        "VARCHAR",  "15%",  "~420",  None,         None,          "15% null – not mandatory",     "AMBER"),
-        ("datecreated",  "DATETIME", "0%",   "~480",  "2020-01-03", "2025-02-28",  "",                             "GREEN"),
-        ("subsidiary_id","INTEGER",  "1%",   5,       1,            5,             "1% null – FK risk",            "AMBER"),
-    ],
-    "VENDOR": [
-        ("id",           "INTEGER",  "0%",   "~200",  1,            9999,          "PK – no nulls",                "GREEN"),
-        ("companyname",  "VARCHAR",  "0%",   "~200",  "A1 Supply",  "Zurich Parts","",                             "GREEN"),
-        ("email",        "VARCHAR",  "20%",  "~160",  None,         None,          "20% null",                     "AMBER"),
-        ("datecreated",  "DATETIME", "0%",   "~195",  "2020-01-05", "2025-02-25",  "",                             "GREEN"),
-        ("subsidiary_id","INTEGER",  "3%",   5,       1,            5,             "3% null",                      "AMBER"),
-    ],
-    "ITEM": [
-        ("id",              "INTEGER",  "0%",  "~1000", 1,            99999,         "PK – no nulls",                "GREEN"),
-        ("itemid",          "VARCHAR",  "0%",  "~1000", "ITEM-0001",  "ITEM-9999",   "",                             "GREEN"),
-        ("salesdescription","VARCHAR",  "8%",  "~920",  None,         None,          "8% null descriptions",         "AMBER"),
-        ("rate",            "DECIMAL",  "5%",  "~800",  0.01,         99999.99,      "5% null – check item type",    "AMBER"),
-        ("lastmodifieddate","DATETIME", "0%",  "~950",  "2020-01-01", "2025-03-01",  "",                             "GREEN"),
-    ],
-}
+# Original Section D / E positions (before any row insertion)
+ORIGINAL_FRESHNESS_HEADER_ROW = 114
+ORIGINAL_FRESHNESS_START_ROW = 115
+ORIGINAL_FRESHNESS_MAX_ROWS = 7
 
-# Referential integrity checks per table: (fk_field, ref_table, ref_field, orphan_count, orphan_pct, impact, rag)
-TABLE_FK_CHECKS = {
-    "CUSTOMER": [
-        ("subsidiary_id", "SUBSIDIARY", "id", 5,  "1.0%", "Low",  "GREEN"),
-        ("salesrep_id",   "EMPLOYEE",   "id", 12, "2.4%", "Low",  "AMBER"),
-    ],
-    "VENDOR": [
-        ("subsidiary_id", "SUBSIDIARY", "id", 6, "3.0%", "Low",  "AMBER"),
-        ("currency_id",   "CURRENCY",   "id", 0, "0.0%", "None", "GREEN"),
-    ],
-    "ITEM": [
-        ("subsidiary_id", "SUBSIDIARY", "id", 0, "0.0%", "None", "GREEN"),
-        ("department_id", "DEPARTMENT", "id", 3, "0.3%", "Low",  "GREEN"),
-    ],
-}
-
-# Section D: Data Freshness header is row 114; data rows 115–121 (7 slots before Section E)
-FRESHNESS_START_ROW = 115
-FRESHNESS_MAX_ROWS = 7
-
-# Section E: Engineer summary col D starts at row 124
-SECTION_E = {
+ORIGINAL_SECTION_E = {
     124: "GREEN",
     125: "1. Null subsidiary_id on ~2% of TRANSACTION rows\n"
          "2. DEPARTMENT row count lower than expected\n"
@@ -193,6 +161,145 @@ SECTION_E = {
     129: "Proceed to field-level profiling for TRANSACTION and CUSTOMER",
     130: "Confirm fiscal year definition used in trandate filters",
 }
+
+# Sentinel used in TABLE_FIELDS distinct column:
+# "=ROW_COUNT"  → replaced at write time with the table's actual COUNT(*) value
+# "=ROW_COUNT*N" → replaced with round(count * N)   e.g. "=ROW_COUNT*0.98"
+
+# Field-level quality data per table: (name, type, null_pct, distinct, min, max, notes, rag)
+TABLE_FIELDS = {
+    "CUSTOMER": [
+        ("id",            "INTEGER",  "0%",   "=ROW_COUNT",      1,            9999,          "PK – no nulls, no duplicates",  "GREEN"),
+        ("companyname",   "VARCHAR",  "2%",   "=ROW_COUNT*0.98", "Aaron Inc",  "Zurich LLC",  "2% blank names",                "AMBER"),
+        ("email",         "VARCHAR",  "15%",  "=ROW_COUNT*0.85", None,         None,          "15% null – not mandatory",      "AMBER"),
+        ("datecreated",   "DATETIME", "0%",   "=ROW_COUNT*0.96", "2020-01-03", "2025-02-28",  "",                              "GREEN"),
+        ("subsidiary_id", "INTEGER",  "1%",   5,                 1,            5,             "1% null – FK risk",             "AMBER"),
+    ],
+    "VENDOR": [
+        ("id",            "INTEGER",  "0%",   "=ROW_COUNT",      1,            9999,          "PK – no nulls, no duplicates",  "GREEN"),
+        ("companyname",   "VARCHAR",  "0%",   "=ROW_COUNT",      "A1 Supply",  "Zurich Parts","",                              "GREEN"),
+        ("email",         "VARCHAR",  "20%",  "=ROW_COUNT*0.80", None,         None,          "20% null",                     "AMBER"),
+        ("datecreated",   "DATETIME", "0%",   "=ROW_COUNT*0.97", "2020-01-05", "2025-02-25",  "",                              "GREEN"),
+        ("subsidiary_id", "INTEGER",  "3%",   5,                 1,            5,             "3% null",                      "AMBER"),
+    ],
+    "ITEM": [
+        ("id",               "INTEGER",  "0%",  "=ROW_COUNT",      1,            99999,         "PK – no nulls, no duplicates",  "GREEN"),
+        ("itemid",           "VARCHAR",  "0%",  "=ROW_COUNT",      "ITEM-0001",  "ITEM-9999",   "Unique item code",              "GREEN"),
+        ("salesdescription", "VARCHAR",  "8%",  "=ROW_COUNT*0.92", None,         None,          "8% null descriptions",          "AMBER"),
+        ("rate",             "DECIMAL",  "5%",  "=ROW_COUNT*0.80", 0.01,         99999.99,      "5% null – check item type",     "AMBER"),
+        ("lastmodifieddate", "DATETIME", "0%",  "=ROW_COUNT*0.95", "2020-01-01", "2025-03-01",  "",                              "GREEN"),
+    ],
+    "TRANSACTION": [
+        ("id",            "INTEGER",  "0%",   "=ROW_COUNT",      1,            99999,         "PK – no nulls, no duplicates",  "GREEN"),
+        ("tranid",        "VARCHAR",  "0%",   "=ROW_COUNT",      "TRN-00001",  "TRN-09999",   "Unique transaction reference",  "GREEN"),
+        ("recordtype",    "VARCHAR",  "0%",   8,                 "invoice",    "vendorbill",  "8 distinct types",              "GREEN"),
+        ("trandate",      "DATETIME", "0%",   "=ROW_COUNT*0.36", "2020-01-02", "2025-03-01",  "=ROW_COUNT*0.36 unique dates",  "GREEN"),
+        ("entity_id",     "INTEGER",  "2%",   "=ROW_COUNT*0.10", 1,            9999,          "2% null – FK risk",             "AMBER"),
+        ("subsidiary_id", "INTEGER",  "2%",   5,                 1,            5,             "2% null – known issue",         "AMBER"),
+        ("amount",        "DECIMAL",  "0%",   "=ROW_COUNT*0.96", 0.01,         999999.99,     "",                              "GREEN"),
+    ],
+    "EMPLOYEE": [
+        ("id",            "INTEGER",  "0%",   "=ROW_COUNT",      1,            9999,          "PK – no nulls, no duplicates",  "GREEN"),
+        ("entityid",      "VARCHAR",  "0%",   "=ROW_COUNT",      "EMP-001",    "EMP-150",     "Unique employee code",          "GREEN"),
+        ("firstname",     "VARCHAR",  "0%",   "=ROW_COUNT*0.99", "Aaron",      "Zoe",         "",                              "GREEN"),
+        ("lastname",      "VARCHAR",  "0%",   "=ROW_COUNT*0.99", "Adams",      "Young",       "",                              "GREEN"),
+        ("email",         "VARCHAR",  "5%",   "=ROW_COUNT*0.95", None,         None,          "5% null",                      "AMBER"),
+        ("hiredate",      "DATE",     "0%",   "=ROW_COUNT*0.97", "2015-01-15", "2024-12-01",  "",                              "GREEN"),
+        ("subsidiary_id", "INTEGER",  "1%",   5,                 1,            5,             "1% null",                      "GREEN"),
+    ],
+    "ACCOUNT": [
+        ("id",               "INTEGER",  "0%",  "=ROW_COUNT",      1,            9999,          "PK – no nulls, no duplicates",  "GREEN"),
+        ("acctnumber",       "VARCHAR",  "0%",  "=ROW_COUNT",      "1000",       "9999",        "Unique account number",         "GREEN"),
+        ("acctname",         "VARCHAR",  "0%",  "=ROW_COUNT*0.99", "Accounts Pay","Wages Exp",  "",                              "GREEN"),
+        ("type",             "VARCHAR",  "0%",  12,                "Bank",       "OtherExpense","12 account types",              "GREEN"),
+        ("lastmodifieddate", "DATETIME", "0%",  "=ROW_COUNT*0.93", "2020-01-01", "2025-02-28",  "",                              "GREEN"),
+    ],
+    "SUBSIDIARY": [
+        ("id",               "INTEGER",  "0%",  "=ROW_COUNT",      1,            20,            "PK – no nulls, no duplicates",  "GREEN"),
+        ("name",             "VARCHAR",  "0%",  "=ROW_COUNT",      "Acme AU",    "Zurich SA",   "",                              "GREEN"),
+        ("currency",         "VARCHAR",  "0%",  6,                 "AUD",        "USD",         "6 currencies",                  "GREEN"),
+        ("country",          "VARCHAR",  "5%",  "=ROW_COUNT*0.95", None,         None,          "5% null country",               "AMBER"),
+        ("lastmodifieddate", "DATETIME", "0%",  "=ROW_COUNT*0.90", "2020-01-01", "2024-06-30",  "",                              "GREEN"),
+    ],
+    "DEPARTMENT": [
+        ("id",               "INTEGER",  "0%",  "=ROW_COUNT",      1,            50,            "PK – no nulls, no duplicates",  "GREEN"),
+        ("name",             "VARCHAR",  "2%",  "=ROW_COUNT*0.98", "Accounts",   "Warehouse",   "2% null names",                 "AMBER"),
+        ("subsidiary_id",    "INTEGER",  "4%",  5,                 1,            5,             "4% null – orphan risk",         "AMBER"),
+        ("lastmodifieddate", "DATETIME", "0%",  "=ROW_COUNT*0.96", "2020-01-01", "2024-12-31",  "",                              "GREEN"),
+    ],
+    "SALESORDER": [
+        ("id",            "INTEGER",  "0%",   "=ROW_COUNT",      1,            99999,         "PK – no nulls, no duplicates",  "GREEN"),
+        ("tranid",        "VARCHAR",  "0%",   "=ROW_COUNT",      "SO-00001",   "SO-09999",    "Unique order reference",        "GREEN"),
+        ("trandate",      "DATE",     "0%",   "=ROW_COUNT*0.64", "2020-01-03", "2025-03-01",  "=ROW_COUNT*0.64 unique dates",  "GREEN"),
+        ("entity_id",     "INTEGER",  "1%",   "=ROW_COUNT*0.20", 1,            9999,          "1% null – FK to CUSTOMER",      "AMBER"),
+        ("amount",        "DECIMAL",  "0%",   "=ROW_COUNT*0.98", 50.00,        99999.99,      "",                              "GREEN"),
+        ("status",        "VARCHAR",  "0%",   6,                 "Billed",     "Pending",     "6 order statuses",              "GREEN"),
+    ],
+    "PURCHASEORDER": [
+        ("id",            "INTEGER",  "0%",   "=ROW_COUNT",      1,            9999,          "PK – no nulls, no duplicates",  "GREEN"),
+        ("tranid",        "VARCHAR",  "0%",   "=ROW_COUNT",      "PO-00001",   "PO-03999",    "Unique PO reference",           "GREEN"),
+        ("trandate",      "DATE",     "0%",   "=ROW_COUNT*0.94", "2020-01-05", "2025-03-01",  "=ROW_COUNT*0.94 unique dates",  "GREEN"),
+        ("entity_id",     "INTEGER",  "2%",   "=ROW_COUNT*0.24", 1,            9999,          "2% null – FK to VENDOR",        "AMBER"),
+        ("amount",        "DECIMAL",  "1%",   "=ROW_COUNT*0.97", 10.00,        49999.99,      "1% null amounts",               "AMBER"),
+        ("status",        "VARCHAR",  "0%",   5,       "Closed",     "PendingReceipt","5 statuses",                 "GREEN"),
+    ],
+}
+
+# Referential integrity checks per table: (fk_field, ref_table, ref_field, orphan_count, orphan_pct, impact, rag)
+TABLE_FK_CHECKS = {
+    "CUSTOMER": [
+        ("subsidiary_id", "SUBSIDIARY", "id", 5,  "1.0%", "Low",    "GREEN"),
+        ("salesrep_id",   "EMPLOYEE",   "id", 12, "2.4%", "Low",    "AMBER"),
+    ],
+    "VENDOR": [
+        ("subsidiary_id", "SUBSIDIARY", "id", 6,  "3.0%", "Low",    "AMBER"),
+        ("currency_id",   "CURRENCY",   "id", 0,  "0.0%", "None",   "GREEN"),
+    ],
+    "ITEM": [
+        ("subsidiary_id", "SUBSIDIARY", "id", 0,  "0.0%", "None",   "GREEN"),
+        ("department_id", "DEPARTMENT", "id", 3,  "0.3%", "Low",    "GREEN"),
+    ],
+    "TRANSACTION": [
+        ("entity_id",     "CUSTOMER",   "id", 98, "2.0%", "Medium", "AMBER"),
+        ("subsidiary_id", "SUBSIDIARY", "id", 95, "1.9%", "Medium", "AMBER"),
+        ("department_id", "DEPARTMENT", "id", 12, "0.2%", "Low",    "GREEN"),
+    ],
+    "EMPLOYEE": [
+        ("subsidiary_id", "SUBSIDIARY", "id", 2,  "1.3%", "Low",    "GREEN"),
+        ("department_id", "DEPARTMENT", "id", 0,  "0.0%", "None",   "GREEN"),
+    ],
+    "ACCOUNT": [
+        ("subsidiary_id", "SUBSIDIARY", "id", 0,  "0.0%", "None",   "GREEN"),
+    ],
+    "SUBSIDIARY": [],
+    "DEPARTMENT": [
+        ("subsidiary_id", "SUBSIDIARY", "id", 2,  "4.0%", "Low",    "AMBER"),
+    ],
+    "SALESORDER": [
+        ("entity_id",     "CUSTOMER",   "id", 22, "0.9%", "Low",    "GREEN"),
+        ("subsidiary_id", "SUBSIDIARY", "id", 8,  "0.3%", "Low",    "GREEN"),
+    ],
+    "PURCHASEORDER": [
+        ("entity_id",     "VENDOR",     "id", 16, "2.0%", "Low",    "AMBER"),
+        ("subsidiary_id", "SUBSIDIARY", "id", 5,  "0.6%", "Low",    "GREEN"),
+    ],
+}
+
+# Section D freshness
+FRESHNESS_MAX_ROWS = 10  # all tables
+
+# Section E: Engineer summary (col D).
+# Item 1 (key issues) is built dynamically in fill_template using actual counts.
+SECTION_E_STATIC = {
+    0: "GREEN",
+    2: "Fabric Tables (pipeline confirmed PASS)",
+    3: "CUSTOMER and VENDOR joinable on entity_id; EMPLOYEE separate",
+    4: "None — pipeline accessible",
+    5: "Proceed to field-level profiling for TRANSACTION and CUSTOMER",
+    6: "Confirm fiscal year definition used in trandate filters",
+}
+SECTION_E_COL = 4
+SECTION_E_ROW_COUNT = len(SECTION_E_STATIC)
 
 
 # ---------------------------------------------------------------------------
@@ -223,17 +330,34 @@ def mock_freshness(table: str) -> dict:
     }
 
 
-# ---------------------------------------------------------------------------
-# Helpers
-# ---------------------------------------------------------------------------
+def resolve_sentinel(value, row_count: int):
+    """Resolve a row-count sentinel to a concrete value.
+
+    Supported forms (row_count=485 example):
+      "=ROW_COUNT"                  → 485
+      "=ROW_COUNT*0.98"             → 475      (integer)
+      "=ROW_COUNT*0.98 some text"   → "475 some text"   (string with suffix)
+      "=TOTAL_ROWS ..."             → handled separately in fill_template
+      anything else                 → returned unchanged
+    """
+    if not isinstance(value, str) or not value.startswith("=ROW_COUNT"):
+        return value
+    remainder = value[len("=ROW_COUNT"):]          # e.g. "", "*0.98", "*0.36 unique dates"
+    if not remainder:
+        return row_count
+    if remainder.startswith("*"):
+        rest = remainder[1:]                        # "0.98" or "0.36 unique dates"
+        parts = rest.split(" ", 1)
+        factor = float(parts[0])
+        computed = round(row_count * factor)
+        if len(parts) == 1:
+            return computed                         # pure numeric result
+        return f"{computed} {parts[1]}"             # numeric + suffix text
+    return value  # unrecognised form — leave as-is
+
 
 def safe_write(ws, row: int, col: int, value):
-    """Write value to a cell, resolving merged ranges to their top-left cell."""
-    coord = f"{get_column_letter(col)}{row}"
-    for mr in ws.merged_cells.ranges:
-        if coord in mr:
-            ws.cell(row=mr.min_row, column=mr.min_col, value=value)
-            return
+    """Write value to a cell (assumes all merges have been removed beforehand)."""
     ws.cell(row=row, column=col, value=value)
 
 
@@ -247,30 +371,45 @@ def fill_template(template_path: str, output_path: str):
     counts = mock_row_counts()
 
     tables = list(counts.keys())
+    n = len(tables)
+
+    # Remove all merged cells up front so every cell is writable.
+    # Template colours, fonts, and borders are preserved; only merge spans are dropped.
+    for mr in list(ws.merged_cells.ranges):
+        ws.unmerge_cells(str(mr))
+
+    total_rows = sum(counts.values())
 
     # --- Section A ---
     for row_num, value in SECTION_A.items():
+        if isinstance(value, str) and "=TOTAL_ROWS" in value:
+            value = value.replace("=TOTAL_ROWS", f"{total_rows:,}")
         safe_write(ws, row_num, 4, value)
 
-    # --- Section B: fill the 3 template block slots ---
-    for slot_idx, (hdr_row, view_row, cnt_row, field_start, fk_start) in enumerate(BLOCK_SLOTS):
-        if slot_idx >= len(tables):
-            break
+    # --- Section B: fill all table blocks ---
+    for slot_idx in range(n):
+        base        = BLOCK_START_ROW + slot_idx * BLOCK_HEIGHT
+        hdr_row     = base
+        view_row    = base + 2
+        cnt_row     = base + 5
+        field_start = base + 14
+        fk_start    = base + 22
+
         table = tables[slot_idx]
-        meta = TABLE_META.get(table, {})
+        meta  = TABLE_META.get(table, {})
         count = counts[table]
 
-        safe_write(ws, hdr_row, 2, f"Table {slot_idx + 1}: {table}")
-        safe_write(ws, view_row, 4, table)
+        safe_write(ws, hdr_row,      2, f"Table {slot_idx + 1}: {table}")
+        safe_write(ws, view_row,     4, table)
         safe_write(ws, view_row + 1, 4, meta.get("purpose", ""))
         safe_write(ws, view_row + 2, 4, meta.get("grain", ""))
-        safe_write(ws, cnt_row, 4, count)
-        safe_write(ws, cnt_row + 1, 4, mock_date_range(table))
-        safe_write(ws, cnt_row + 2, 4, meta.get("pk", ""))
-        safe_write(ws, cnt_row + 3, 4, "PASS" if count > 0 else "FAIL")
-        safe_write(ws, cnt_row + 4, 4, meta.get("domain", ""))
-        safe_write(ws, cnt_row + 5, 4, meta.get("entities", ""))
-        safe_write(ws, cnt_row + 6, 4, "GREEN")
+        safe_write(ws, cnt_row,      4, count)
+        safe_write(ws, cnt_row + 1,  4, mock_date_range(table))
+        safe_write(ws, cnt_row + 2,  4, meta.get("pk", ""))
+        safe_write(ws, cnt_row + 3,  4, "PASS" if count > 0 else "FAIL")
+        safe_write(ws, cnt_row + 4,  4, meta.get("domain", ""))
+        safe_write(ws, cnt_row + 5,  4, meta.get("entities", ""))
+        safe_write(ws, cnt_row + 6,  4, "GREEN")
 
         # Field-Level Quality
         for fi, (fname, ftype, null_pct, distinct, fmin, fmax, notes, rag) in enumerate(
@@ -280,10 +419,10 @@ def fill_template(template_path: str, output_path: str):
             ws.cell(row=r, column=2, value=fname)
             ws.cell(row=r, column=3, value=ftype)
             ws.cell(row=r, column=4, value=null_pct)
-            ws.cell(row=r, column=5, value=distinct)
+            ws.cell(row=r, column=5, value=resolve_sentinel(distinct, count))
             ws.cell(row=r, column=6, value=fmin)
             ws.cell(row=r, column=7, value=fmax)
-            ws.cell(row=r, column=8, value=notes)
+            ws.cell(row=r, column=8, value=resolve_sentinel(notes, count))
             ws.cell(row=r, column=9, value=rag)
 
         # Referential Integrity Checks
@@ -299,10 +438,14 @@ def fill_template(template_path: str, output_path: str):
             ws.cell(row=r, column=7, value=impact)
             ws.cell(row=r, column=8, value=rag)
 
-    # --- Section D: Data Freshness — up to 7 tables (template row limit) ---
-    for i, (table, count) in enumerate(list(counts.items())[:FRESHNESS_MAX_ROWS]):
+    # --- Section D: Data Freshness ---
+    # Place freshness immediately after the last table block (+ 2 blank rows gap)
+    last_block_base = BLOCK_START_ROW + (n - 1) * BLOCK_HEIGHT
+    freshness_start = last_block_base + BLOCK_HEIGHT + 2   # 2-row gap after last block
+    safe_write(ws, freshness_start - 1, 2, "Section D – Data Freshness")
+    for i, (table, _count) in enumerate(counts.items()):
         f = mock_freshness(table)
-        r = FRESHNESS_START_ROW + i
+        r = freshness_start + i
         safe_write(ws, r, 2, table)
         safe_write(ws, r, 3, f["date_field"])
         safe_write(ws, r, 4, f["most_recent"])
@@ -312,14 +455,37 @@ def fill_template(template_path: str, output_path: str):
         safe_write(ws, r, 8, f["notes"])
 
     # --- Section E: Engineer Summary ---
-    for row_num, value in SECTION_E.items():
-        safe_write(ws, row_num, 4, value)
+    section_e_start = freshness_start + n + 2   # 2-row gap after freshness
+    safe_write(ws, section_e_start - 1, 2, "Section E – Engineer Summary")
+
+    # Build the key-issues line with actual counts instead of approximations
+    txn_null_subsidiary  = round(counts.get("TRANSACTION",    0) * 0.02)
+    txn_null_entity      = round(counts.get("TRANSACTION",    0) * 0.02)
+    dept_null_subsidiary = round(counts.get("DEPARTMENT",     0) * 0.04)
+    vendor_null_email    = round(counts.get("VENDOR",         0) * 0.20)
+    po_null_entity       = round(counts.get("PURCHASEORDER",  0) * 0.02)
+
+    section_e_issues = (
+        f"1. Null subsidiary_id on {txn_null_subsidiary} TRANSACTION rows "
+        f"({txn_null_subsidiary / counts.get('TRANSACTION', 1):.1%})\n"
+        f"2. DEPARTMENT: {dept_null_subsidiary} rows with null subsidiary_id "
+        f"({dept_null_subsidiary / counts.get('DEPARTMENT', 1):.1%}) – orphan risk\n"
+        f"3. No direct FK from SALESORDER to CONTRACT\n"
+        f"4. VENDOR: {vendor_null_email} rows with null email "
+        f"({vendor_null_email / counts.get('VENDOR', 1):.1%}) – enrich before CRM migration\n"
+        f"5. PURCHASEORDER: {po_null_entity} rows with null entity_id "
+        f"({po_null_entity / counts.get('PURCHASEORDER', 1):.1%}) – verify vendor onboarding"
+    )
+
+    section_e_content = {**SECTION_E_STATIC, 1: section_e_issues}
+    for offset, value in section_e_content.items():
+        safe_write(ws, section_e_start + offset, SECTION_E_COL, value)
 
     wb.save(output_path)
     print(f"Filled template saved to: {output_path}")
-    print(f"\nSection B  — {min(3, len(tables))} table block(s) filled")
-    print(f"Section D  — {min(FRESHNESS_MAX_ROWS, len(tables))} tables in Data Freshness")
-    print("Section E  — Engineer Summary filled")
+    print(f"\nSection B  — {n} table block(s) filled")
+    print(f"Section D  — {n} tables in Data Freshness  (rows {freshness_start}–{freshness_start + n - 1})")
+    print(f"Section E  — Engineer Summary  (rows {section_e_start}–{section_e_start + SECTION_E_ROW_COUNT - 1})")
 
 
 def parse_args():
