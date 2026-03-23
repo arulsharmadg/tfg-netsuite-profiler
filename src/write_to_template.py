@@ -358,8 +358,11 @@ def resolve_sentinel(value, row_count: int):
 
 
 def copy_block_format(ws, source_idx: int, target_idx: int, n_cols: int = 12):
-    """Copy cell styles (fill, font, border, alignment, number_format) from
-    the source block to the target block row-for-row, column-for-column.
+    """Copy cell values AND styles from the source block to the target block
+    row-for-row, column-for-column.  This propagates both the static row labels
+    (e.g. 'Table / view name', 'Business purpose') and all visual formatting.
+    Data writes that happen afterwards will overwrite the value cells (col D)
+    with the actual table-specific content.
     Call this AFTER unmerging so every cell is a plain Cell object.
     """
     source_base = BLOCK_START_ROW + source_idx * BLOCK_HEIGHT
@@ -368,6 +371,7 @@ def copy_block_format(ws, source_idx: int, target_idx: int, n_cols: int = 12):
         for col in range(1, n_cols + 1):
             src = ws.cell(row=source_base + row_off, column=col)
             tgt = ws.cell(row=target_base + row_off, column=col)
+            tgt.value         = src.value          # copy static labels too
             tgt.font          = copy(src.font)
             tgt.fill          = copy(src.fill)
             tgt.border        = copy(src.border)
